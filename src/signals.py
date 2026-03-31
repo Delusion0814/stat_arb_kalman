@@ -1,4 +1,4 @@
-def generate_signal(zscore, entry=2.0, exit=0.5, stoploss=3.0, max_hold=20):
+def generate_signal(zscore, entry=2.0, exit=0.5, stoploss=3.5, max_hold=20):
     """
     生成交易信号（含止盈/止损/最大持仓天数）
     :param zscore: z-score 序列
