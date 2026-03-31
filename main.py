@@ -10,38 +10,55 @@ from src.metrics import sharpe_ratio, max_drawdown
 from src.getdata import fetch_pair_data 
 #from src.data_loader import load_data # 可选：如果不使用 AkShare 获取数据，而是从本地 CSV 文件加载数据，则需要引入这个模块
 
-def run_pair(symbol1, symbol2):
+def run_pair(symbol1, symbol2, formation_period=252):
     print('=' * 50)
     print(f'回测标的: {symbol1} / {symbol2}')
 
-    data = fetch_pair_data(symbol1, symbol2)# 若已有数据文件，可替换为读取本地 CSV 文件的方式，例如：data=load_data(path),需要引入dataloader
-    window_df = data.copy()
-
-    pairs = find_cointegrated_pairs(window_df)
+    # 获取原始数据
+    data = fetch_pair_data(symbol1, symbol2)
+    #data = load_data("pair_data.csv")
+    
+    # --- 1. 前瞻偏差处理 ---
+    # 仅使用“形成期”（前 formation_period 天）进行初次协整检验
+    formation_df = data.iloc[:formation_period]
+    trading_df = data.iloc[formation_period:] # 实际交易区间
+    
+    pairs = find_cointegrated_pairs(formation_df)
     if not pairs:
-        raise RuntimeError(f"{symbol1}/{symbol2} 未通过协整检验")
+        # 如果初始不协整，可以选择跳过或记录
+        raise RuntimeError(f"{symbol1}/{symbol2} 在形成期未通过协整检验")
 
     pair = pairs[0]
-    x = window_df[pair[0]]
-    y = window_df[pair[1]]
+    # 使用全量数据进入 Kalman，但 Kalman 本身是流式的，不会预知未来
+    x = data[pair[0]]
+    y = data[pair[1]]
 
-    # 1. 计算 Kalman Beta
-    beta_series, intercept_series = kalman_estimate(y, x)
+    # --- 2. 计算 Kalman Beta ---
+    beta_list, intercept_list = kalman_estimate(y, x)
+    
+    beta_series = pd.Series(beta_list, index=y.index)
+    intercept_series = pd.Series(intercept_list, index=y.index)
 
-    # 强制对齐索引，防止绘图错位
-    beta_series = pd.Series(beta_series, index=y.index)
-    intercept_series = pd.Series(intercept_series, index=y.index)
+    # --- 3. Z-Score 计算 ---
+    # 直接计算残差 (Spread)
+    spread = y - (beta_series * x + intercept_series)
+    
+    # 均值(mu)直接设为 0, 因为 Kalman 的目标就是将残差均值收敛至 0
+    mu = 0 
+    sigma = spread.rolling(window=30).std()
+    zscore = (spread / sigma).fillna(0)
 
-    # 2. 计算 Z-Score
-    spread = y - beta_series * x - intercept_series
-    lookback = 20
-    mu = spread.rolling(lookback).mean()
-    sigma = spread.rolling(lookback).std().replace(0, np.nan)
-    zscore = ((spread - mu) / sigma).fillna(0)
-
-    # 3. 回测
-    signals = generate_signal(zscore, entry=2.5, exit=0.8, stoploss=3.0, max_hold=15)
-    net_return, cum_return = backtest_strategy(window_df[[pair[0], pair[1]]], signals, beta=beta_series, transaction_cost=0.002)
+    # --- 4. 回测 (仅在非形成期进行，或者全量回测但观察交易区间) ---
+    signals_list = generate_signal(zscore, entry=2.5, exit=0.8, stoploss=3.0, max_hold=15)
+    signals = pd.Series(signals_list, index=zscore.index)
+    
+    # 传入全量数据，但指标计算会涵盖整个区间
+    net_return, cum_return = backtest_strategy(
+        data[[pair[0], pair[1]]], 
+        signals, 
+        beta=beta_series, 
+        transaction_cost=0.002
+    )
 
     # --- 开始绘图逻辑 ---
     fig, axes = plt.subplots(3, 1, figsize=(12, 15), sharex=True)
@@ -71,28 +88,27 @@ def run_pair(symbol1, symbol2):
     plt.show()
     # --- 绘图结束 ---
 
-    # 计算各项指标
+    # 5. 指标计算
     daily_return = net_return.fillna(0)
     sharpe = sharpe_ratio(daily_return)
     max_dd = max_drawdown(cum_return)
     total_return = (cum_return.iloc[-1] - 1) * 100
     
-    period_years = (cum_return.index[-1] - cum_return.index[0]).days / 365.25
-    annual_return = ((cum_return.iloc[-1]) ** (1 / period_years) - 1) * 100 if period_years > 0 else 0
-    total_profit = 100000 * (cum_return.iloc[-1] - 1)
-
+    # 使用交易日频率 (252) 计算年化，比自然日计算更准
+    trading_days = len(cum_return)
+    annual_return = ((cum_return.iloc[-1]) ** (252 / trading_days) - 1) * 100
+    
     # 打印结果
     print(f"夏普比率: {sharpe:.4f}")
     print(f"最大回撤: {max_dd:.4%}")
     print(f"总收益率: {total_return:.2f}%")
     print(f"年化收益: {annual_return:.2f}%")
-    print(f"实际收益: {total_profit:.2f} 元")
+
     print('=' * 50)
 
     return {
         'symbol1': symbol1, 'symbol2': symbol2,
-        'sharpe': sharpe, 'max_drawdown': max_dd,
-        'total_return': total_return, 'profit': total_profit
+        'sharpe': sharpe, 'annual_return': annual_return
     }
 
 if __name__ == '__main__':
@@ -105,6 +121,3 @@ if __name__ == '__main__':
         print(f"未提供命令行参数，默认使用 {s1} 和 {s2} 进行回测")
 
     run_pair(s1, s2)
-
-    
-
