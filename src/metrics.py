@@ -8,6 +8,11 @@ def sharpe_ratio(returns, risk_free_rate=0.0):
     :return: 夏普比率
     """
     excess_returns = returns - risk_free_rate
+    std = excess_returns.std()
+    
+    if std == 0 or np.isnan(std):
+        return 0.0
+        
     return excess_returns.mean() / excess_returns.std() * np.sqrt(252)
 
 def max_drawdown(cum_return):
